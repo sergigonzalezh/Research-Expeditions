@@ -2,93 +2,252 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Expedition Globe — Demo</title>
+  <title>Expedition Globe</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     html,body { height:100%; margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial;}
     #globeViz { width:100%; height:100vh; display:block; }
     .popup {
-      background: rgba(255,255,255,0.95);
-      border-radius:6px;
+      background: rgba(255,255,255,0.98);
+      border-radius:8px;
       padding:10px;
-      max-width:260px;
-      box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+      max-width:340px;
+      box-shadow: 0 8px 22px rgba(0,0,0,0.18);
       font-size:13px;
+      line-height:1.25;
     }
-    .popup img { width:100%; height:auto; border-radius:4px; margin-bottom:6px; }
-    .legend { position: absolute; left: 12px; top: 12px; z-index:2; background:rgba(255,255,255,0.9); padding:8px 10px; border-radius:8px; font-size:13px; }
+    .popup img { width:100%; height:auto; border-radius:6px; margin-bottom:8px; }
+    .legend { position: absolute; left: 12px; top: 12px; z-index:2; background:rgba(255,255,255,0.95); padding:8px 12px; border-radius:8px; font-size:13px; }
+    .cluster-count {
+      display:inline-block;
+      min-width:28px;
+      height:28px;
+      line-height:28px;
+      border-radius:14px;
+      background: rgba(0,140,200,0.95);
+      color:white;
+      text-align:center;
+      font-weight:600;
+      padding:0 8px;
+      box-shadow: 0 3px 10px rgba(0,0,0,0.25);
+    }
   </style>
 </head>
 <body>
   <div id="globeViz"></div>
-  <div class="legend">Click markers for expedition info • Use mouse to rotate/zoom</div>
+  <div class="legend">Click markers for expedition info • Use mouse to rotate/zoom • Click clusters to zoom in</div>
 
-  <!-- three.js + globe.gl from CDN -->
+  <!-- Libraries -->
   <script src="https://unpkg.com/three@0.150.1/build/three.min.js"></script>
   <script src="https://unpkg.com/three@0.150.1/examples/js/controls/OrbitControls.js"></script>
   <script src="https://unpkg.com/globe.gl"></script>
 
   <script>
-  // Example data inline. Replace with fetch('/expeditions.json') if you host a separate file.
-  const DATA = {
-    points: [
-      { id:'exp1', name:'Antarctic Traverse 2023', lat:-75.25, lng:-0.071, date:'2023-12-10', short:'Zero-emission Windsled traverse. Photos & notes.', image:'https://placekitten.com/800/400', url:'#' },
-      { id:'exp2', name:'Greenland Fieldwork 2024', lat:72.0, lng:-40.0, date:'2024-07-05', short:'Snow/meteorological AWS sites.', image:'https://placekitten.com/801/400', url:'#' },
-      { id:'exp3', name:'Alpine Campaign 2022', lat:42.35, lng:2.2, date:'2022-09-01', short:'High-mountain snow pits and sensors', image:'https://placekitten.com/802/400', url:'#' }
-    ],
-    routes: [
-      { id:'r1', coords:[[-0.071,-75.25],[-20,-60],[-40,72.0]] } // [lng,lat] pairs - note we will convert if necessary
-    ]
-  };
+  (async function() {
+    // === CONFIG ===
+    const DATA_URL = 'expeditions.json'; // change if your JSON filename differs
+    const CLUSTER_DISTANCE_METERS = 3000; // points closer than this will be clustered
+    const MARKER_SCALE = 0.9; // marker size multiplier
+    const CLOUDS_OPACITY = 0.45;
 
-  // Convert points to globe-friendly format
-  const markers = DATA.points.map(p => ({
-    lat: p.lat,
-    lng: p.lng,
-    name: p.name,
-    id: p.id,
-    short: p.short,
-    date: p.date,
-    image: p.image,
-    url: p.url
-  }));
+    // Utils
+    function haversineMeters(a, b) {
+      const [lon1, lat1] = a;
+      const [lon2, lat2] = b;
+      const R = 6371000;
+      const phi1 = lat1 * Math.PI/180, phi2 = lat2 * Math.PI/180;
+      const dphi = (lat2-lat1) * Math.PI/180, dlambda = (lon2-lon1) * Math.PI/180;
+      const ah = Math.sin(dphi/2)**2 + Math.cos(phi1)*Math.cos(phi2)*Math.sin(dlambda/2)**2;
+      return 2*R*Math.asin(Math.sqrt(ah));
+    }
 
-  // Helper to build simple HTML popup
-  function makePopupHtml(d) {
-    return `
-      <div class="popup">
-        ${d.image ? `<img src="${d.image}" alt="${d.name}">` : ''}
-        <strong>${d.name}</strong><br/>
-        <small>${d.date}</small>
-        <p style="margin:6px 0 0 0">${d.short || ''}</p>
-        ${d.url ? `<p style="margin:6px 0 0 0"><a href="${d.url}" target="_blank" rel="noopener">Read more</a></p>` : ''}
-      </div>`;
-  }
+    // Fetch data
+    let DATA;
+    try {
+      const res = await fetch(DATA_URL);
+      DATA = await res.json();
+    } catch (err) {
+      document.getElementById('globeViz').innerText = 'Failed to load ' + DATA_URL + '. Make sure the JSON is deployed next to index.html';
+      console.error(err);
+      return;
+    }
 
-  // Create the globe
-  const world = Globe()
-    (document.getElementById('globeViz'))
-    .globeImageUrl('//unpkg.com/three-globe/example/img/earth-night.jpg') // nice night texture
-    .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png') // subtle topography
-    .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
-    .showAtmosphere(true)
-    .pointOfView({ lat: 20, lng: 10, altitude: 2.5 }, 0) // initial camera
-    .controls() // allow drag/zoom
-    ;
+    // === clustering (simple greedy) ===
+    function clusterPoints(points, maxDistMeters) {
+      const clusters = [];
+      const used = new Array(points.length).fill(false);
+      for (let i=0;i<points.length;i++){
+        if (used[i]) continue;
+        const p = points[i];
+        const cluster = { members: [p], lon: p.lng, lat: p.lat };
+        used[i] = true;
+        for (let j=i+1;j<points.length;j++){
+          if (used[j]) continue;
+          const q = points[j];
+          const d = haversineMeters([p.lng,p.lat],[q.lng,q.lat]);
+          if (d <= maxDistMeters) {
+            cluster.members.push(q);
+            used[j] = true;
+          }
+        }
+        // compute centroid for cluster
+        if (cluster.members.length>1) {
+          let sx=0, sy=0;
+          cluster.members.forEach(m => { sx += m.lng; sy += m.lat; });
+          cluster.lon = sx/cluster.members.length;
+          cluster.lat = sy/cluster.members.length;
+        }
+        clusters.push(cluster);
+      }
+      return clusters;
+    }
 
-  // Add markers (as small 3D sprites)
-  world
-    .pointsData(markers)
-    .pointLat('lat')
-    .pointLng('lng')
-    .pointAltitude(0.01)
-    .pointColor(() => '#ffcc00')
-    .pointLabel('name')
-    .pointRadius(0.4)
-    .onPointClick((d) => {
-      // show popup anchored at the top-left of the page (simple)
-      const content = makePopupHtml(d);
-      // remove old popup if any
+    // Prepare points: ensure objects have lat/lng fields
+    const rawPoints = (DATA.points || []).map(p => ({
+      id: p.id, name: p.name, lat: +p.lat, lng: +p.lng, date: p.date, short: p.short, image: p.image, url: p.url
+    }));
+
+    // Create clusters
+    const clusters = clusterPoints(rawPoints, CLUSTER_DISTANCE_METERS);
+    // Convert clusters to marker data objects
+    // If cluster.members.length === 1 => single marker, else cluster marker with count
+    const markerData = clusters.map(c => {
+      if (c.members.length === 1) {
+        const m = c.members[0];
+        return { type: 'single', count:1, lat: c.lat, lng: c.lon, members: [m], ...m };
+      } else {
+        return { type:'cluster', count: c.members.length, lat: c.lat, lng: c.lon, members: c.members };
+      }
+    });
+
+    // === Create globe with day texture and cloud layer ===
+    const world = Globe()(document.getElementById('globeViz'))
+      .globeImageUrl('https://unpkg.com/three-globe/example/img/earth-day.jpg')    // day map
+      .bumpImageUrl('https://unpkg.com/three-globe/example/img/earth-topology.png')
+      .backgroundImageUrl('https://unpkg.com/three-globe/example/img/night-sky.png')
+      .showAtmosphere(true)
+      .pointOfView({ lat: -55, lng: -68, altitude: 1.6 }, 0)
+      .controls().autoRotate = false;
+
+    // Add cloud layer (slightly larger transparent sphere)
+    (function addClouds(){
+      const loader = new THREE.TextureLoader();
+      loader.crossOrigin = '';
+      loader.load('https://unpkg.com/three-globe/example/img/earth-clouds.png', tex => {
+        const cloudMat = new THREE.MeshPhongMaterial({
+          map: tex,
+          transparent: true,
+          opacity: CLOUDS_OPACITY,
+          depthWrite: false
+        });
+        const r = world.getGlobeRadius() * 1.015;
+        const cloudGeo = new THREE.SphereGeometry(r, 64, 64);
+        const cloudMesh = new THREE.Mesh(cloudGeo, cloudMat);
+        cloudMesh.name = 'cloudLayer';
+        world.scene().add(cloudMesh);
+      });
+    })();
+
+    // === Custom marker creation ===
+    // Create an SVG expedition pin (snow/flag) and convert to texture
+    const svgPin = encodeURIComponent(`
+      <svg xmlns='http://www.w3.org/2000/svg' width='80' height='100' viewBox='0 0 80 100'>
+        <defs>
+          <filter id='s' x='-50%' y='-50%' width='200%' height='200%'>
+            <feDropShadow dx='0' dy='2' stdDeviation='3' flood-color='#000' flood-opacity='0.3'/>
+          </filter>
+        </defs>
+        <g filter='url(#s)'>
+          <path d='M40 6 C57 6 70 20 70 36 C70 58 40 92 40 92 C40 92 10 58 10 36 C10 20 23 6 40 6 Z' fill='#0288d1' />
+          <circle cx='40' cy='36' r='10' fill='#ffffff' />
+          <rect x='36' y='42' width='8' height='40' rx='3' fill='#996633' />
+          <path d='M28 22 L40 28 L28 34 Z' fill='#ffffff' opacity='0.9'/>
+        </g>
+      </svg>
+    `);
+    const pinDataUrl = 'data:image/svg+xml;charset=utf-8,' + svgPin;
+
+    // Create function that returns a THREE.Object3D for a marker (single or cluster)
+    function createMarkerObject(d) {
+      const size = (d.type === 'cluster') ? 0.9 * MARKER_SCALE : 0.7 * MARKER_SCALE;
+      // create a sprite for the pin
+      const map = new THREE.TextureLoader().load(pinDataUrl);
+      const material = new THREE.SpriteMaterial({ map, depthTest: false });
+      const sprite = new THREE.Sprite(material);
+      sprite.scale.set(size, size * 1.2, 1);
+      // If cluster, add a canvas bubble with count
+      if (d.type === 'cluster') {
+        // draw canvas texture for count badge
+        const cvs = document.createElement('canvas');
+        cvs.width = 256; cvs.height = 256;
+        const ctx = cvs.getContext('2d');
+        // circle
+        ctx.beginPath();
+        ctx.arc(128,128,96,0,Math.PI*2);
+        ctx.fillStyle = '#008cc8';
+        ctx.fill();
+        // count
+        ctx.fillStyle = 'white';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = 'bold 120px sans-serif';
+        ctx.fillText(String(d.count), 128, 140);
+        const tex = new THREE.CanvasTexture(cvs);
+        const badge = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest:false }));
+        badge.scale.set(0.7*size, 0.7*size, 1);
+        const group = new THREE.Group();
+        sprite.position.set(0,0,0);
+        badge.position.set(0, -size*0.55, 0.01);
+        group.add(sprite);
+        group.add(badge);
+        group.userData = { members: d.members || [], cluster:true, count:d.count };
+        return group;
+      } else {
+        sprite.userData = { single:true, meta: d };
+        return sprite;
+      }
+    }
+
+    // Hook into globe to use custom objects
+    world
+      .pointsData(markerData)
+      .pointLat('lat')
+      .pointLng('lng')
+      .pointColor(() => '#ffffff') // unused when using customThreeObject
+      .pointAltitude(0.01)
+      .pointLabel('name')
+      .pointRadius(0.6)
+      .customThreeObject(function(d) {
+        // return a 3D object per marker (expedition pin or cluster group)
+        return createMarkerObject(d);
+      })
+      .onPointClick(function(d) {
+        // If cluster, zoom to expand cluster (fly to center and increase altitude lower)
+        if (d.type === 'cluster' && d.count > 1) {
+          // fly slightly above cluster and reduce altitude to zoom in
+          const newAlt = Math.max(0.6, world.pointOfView().altitude * 0.5);
+          world.pointOfView({ lat: d.lat, lng: d.lng, altitude: newAlt }, 1000);
+          // optionally, when zoomed in, you might want to replace clusters with their members;
+          // simplest approach: open a popup listing members and provide a "zoom to" link
+          showClusterPopup(d);
+          return;
+        }
+        // Single point: show popup with details
+        const meta = d;
+        showPopupFor(meta);
+      });
+
+    // === popups ===
+    function showPopupFor(meta) {
+      const content = `
+        <div class="popup">
+          ${meta.image ? `<img src="${meta.image}" alt="${meta.name}">` : ''}
+          <strong>${meta.name || ''}</strong><br/>
+          <small>${meta.date || ''}</small>
+          <p style="margin:8px 0 0 0">${meta.short || ''}</p>
+          ${meta.url ? `<p style="margin:6px 0 0 0"><a href="${meta.url}" target="_blank" rel="noopener">Read more</a></p>` : ''}
+        </div>
+      `;
       const existing = document.getElementById('globePopup');
       if (existing) existing.remove();
       const popup = document.createElement('div');
@@ -98,37 +257,85 @@
       popup.style.bottom = '12px';
       popup.innerHTML = content;
       document.body.appendChild(popup);
+    }
+
+    function showClusterPopup(cluster) {
+      const members = (cluster.members || []);
+      if (!members.length) return;
+      let list = members.slice(0,30).map(m => `<li style="margin:6px 0"><strong>${m.name || ''}</strong> — ${m.date || ''} ${m.short ? `<div style="font-size:12px;color:#444">${m.short}</div>` : ''}</li>`).join('');
+      if (members.length > 30) list += `<li style="margin:6px 0;color:#666">... and ${members.length-30} more</li>`;
+      const content = `
+        <div class="popup">
+          <strong>Cluster: ${cluster.count} expeditions</strong>
+          <ul style="margin:8px 0 0 0; padding-left:16px;">${list}</ul>
+          <p style="margin-top:8px;"><button id="globeZoomMembers" style="padding:6px 10px;border-radius:6px;border:0;background:#0288d1;color:white;cursor:pointer">Zoom to cluster</button></p>
+        </div>
+      `;
+      const existing = document.getElementById('globePopup');
+      if (existing) existing.remove();
+      const popup = document.createElement('div');
+      popup.id = 'globePopup';
+      popup.style.position = 'absolute';
+      popup.style.right = '12px';
+      popup.style.bottom = '12px';
+      popup.innerHTML = content;
+      document.body.appendChild(popup);
+      document.getElementById('globeZoomMembers').onclick = () => {
+        world.pointOfView({ lat: cluster.lat, lng: cluster.lng, altitude: 0.9 }, 800);
+      };
+    }
+
+    // cleanup popup on outside click
+    document.addEventListener('click', (ev) => {
+      const existing = document.getElementById('globePopup');
+      if (existing && !ev.target.closest('.popup')) existing.remove();
     });
 
-  // Add routes as arcs (convert to lat/lng order)
-  world
-    .arcsData(DATA.routes.map(r => ({
-      startLat: r.coords[0][1], startLng: r.coords[0][0],
-      endLat: r.coords[r.coords.length-1][1], endLng: r.coords[r.coords.length-1][0],
-      color: ['rgba(0,200,255,0.8)']
-    })))
-    .arcColor('color')
-    .arcAltitudeAutoScale(true)
-    .arcStroke(1)
-    .arcLabel(d => `Route`)
-    .arcsTransitionDuration(1000);
+    // === draw routes: full polyline(s) from DATA.routes ===
+    function drawRoutes(routes) {
+      if (!routes || !routes.length) return;
+      // For each route, convert [lon,lat] -> 3D points and draw a line
+      routes.forEach((r, idx) => {
+        const coords = r.coords || [];
+        if (coords.length < 2) return;
+        const points3 = coords.map(c => {
+          const lon = c[0], lat = c[1];
+          const phi = (90 - lat) * (Math.PI/180);
+          const theta = (lon + 180) * (Math.PI/180);
+          const r0 = world.getGlobeRadius() * 1.005 + (0.002 * world.getGlobeRadius()); // slightly above surface
+          const x = r0 * Math.sin(phi) * Math.cos(theta);
+          const y = r0 * Math.cos(phi);
+          const z = r0 * Math.sin(phi) * Math.sin(theta);
+          return new THREE.Vector3(x,y,z);
+        });
+        const lineGeometry = new THREE.BufferGeometry().setFromPoints(points3);
+        const color = new THREE.Color(0x00c8ff);
+        const mat = new THREE.LineBasicMaterial({ color: color, linewidth: 1 });
+        const line = new THREE.Line(lineGeometry, mat);
+        line.name = 'route-' + (r.id || idx);
+        world.scene().add(line);
 
-  // Optionally: fly to a marker
-  function flyToPoint(id) {
-    const p = markers.find(m => m.id === id);
-    if (!p) return;
-    world.pointOfView({ lat: p.lat, lng: p.lng, altitude: 1.2 }, 1500);
-  }
+        // optionally add a small moving dot or arrow along route later
+      });
+    }
 
-  // Example: fly to first point after 1s
-  setTimeout(()=>flyToPoint(markers[0].id), 1200);
+    // Draw routes now
+    drawRoutes(DATA.routes || []);
 
-  // Clean up popup on click outside
-  document.addEventListener('click', (ev)=> {
-    const existing = document.getElementById('globePopup');
-    if (existing && !ev.target.closest('.popup')) existing.remove();
-  });
+    // final: center view on first marker (if any)
+    if (markerData.length > 0) {
+      const first = markerData[0];
+      world.pointOfView({ lat: first.lat, lng: first.lng, altitude: 1.2 }, 1200);
+    }
 
+    // Small responsive tweak: rotate clouds slowly
+    (function animateClouds(){
+      const cloud = world.scene().getObjectByName('cloudLayer');
+      if (cloud) cloud.rotation.y += 0.0006;
+      requestAnimationFrame(animateClouds);
+    })();
+
+  })();
   </script>
 </body>
 </html>
