@@ -320,7 +320,14 @@
     }
 
     // Draw routes now
-    drawRoutes(DATA.routes || []);
+    world.drawRoutes(DATA.routes || []);
+
+    // Version 2 of draw routes
+    setTimeout(() => {
+      globe
+        .pathPointAlt(pnt => pnt[2]) // set altitude accessor
+        .pathTransitionDuration(4000)
+    }, 6000);
 
     // final: center view on first marker (if any)
     if (markerData.length > 0) {
@@ -329,11 +336,11 @@
     }
 
     // Small responsive tweak: rotate clouds slowly
-    (function animateClouds(){
-      const cloud = world.scene().getObjectByName('cloudLayer');
-      if (cloud) cloud.rotation.y += 0.0006;
-      requestAnimationFrame(animateClouds);
-    })();
+    //(function animateClouds(){
+    //  const cloud = world.scene().getObjectByName('cloudLayer');
+    //  if (cloud) cloud.rotation.y += 0.0006;
+    //  requestAnimationFrame(animateClouds);
+    //})();
 
   })();
   </script>
